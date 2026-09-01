@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLC WebRTC Sync Hub</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card: #1e293b;
+            --accent: #3b82f6;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --green: #22c55e;
+            --red: #ef4444;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .card {
+            background: var(--card);
+            border-radius: 14px;
+            padding: 2rem;
+            width: 100%;
+            max-width: 440px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+        }
+        h2 { margin-top: 0; text-align: center; }
+        .section {
+            background: #0f172a;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            border: 1px solid #334155;
+        }
+        label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
+        input {
+            width: 100%;
+            padding: 8px 10px;
+            border-radius: 6px;
+            background: #1e293b;
+            border: 1px solid #475569;
+            color: #fff;
+            box-sizing: border-box;
+            margin-bottom: 8px;
+        }
+        button {
+            width: 100%;
+            background: var(--accent);
+            border: none;
+            color: white;
+            padding: 10px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { filter: brightness(1.1); }
+        .btn-group { display: flex; gap: 8px; }
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            margin-top: 6px;
+        }
+        .status-dot {
+            height: 8px;
+            width: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            background: var(--red);
+            margin-right: 4px;
+        }
+        .status-dot.active { background: var(--green); }
+        .playback-display {
+            text-align: center;
+            padding: 10px;
+            background: #334155;
+            border-radius: 6px;
+            margin-top: 10px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>🍿 VLC Sync Hub (P2P)</h2>
+
+    <div class="section">
+        <label>VLC HTTP Password</label>
+        <input type="password" id="vlcPassword" value="vlcpass">
+        <div class="status-row">
+            <span>Local VLC Status:</span>
+            <span><span id="vlcDot" class="status-dot"></span><span id="vlcStatusText">Offline</span></span>
+        </div>
+    </div>
+
+    <div class="section">
+        <label>Room Code</label>
+        <input type="text" id="roomIdInput" placeholder="e.g. movie-night-123">
+        <div class="btn-group">
+            <button onclick="createRoom()">Create Room</button>
+            <button onclick="joinRoom()" style="background: #6366f1;">Join Room</button>
+        </div>
+        <div class="status-row">
+            <span>Peer Connection:</span>
+            <span><span id="peerDot" class="status-dot"></span><span id="peerStatusText">Disconnected</span></span>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="playback-display" id="playbackState">
+            VLC: --:-- (Stopped)
+        </div>
+        <div class="status-row" style="margin-top: 8px;">
+            <span>Sync Offset:</span>
+            <span id="driftText">0.00s</span>
+        </div>
+        <div class="btn-group" style="margin-top: 10px;">
+            <button onclick="sendVlcCommand('pl_play')">▶ Play</button>
+            <button onclick="sendVlcCommand('pl_pause')" style="background: #64748b;">⏸ Pause</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let peer = null;
+    let conn = null;
+    let lastLocalState = null;
+    let isApplyingRemote = false;
+
+    // --- PeerJS / WebRTC Setup ---
+    function initPeer(customId = null) {
+        if (peer) peer.destroy();
+        peer = customId ? new Peer(customId) : new Peer();
+
+        peer.on('open', (id) => {
+            document.getElementById('roomIdInput').value = id;
+            document.getElementById('peerStatusText').innerText = 'Ready (Waiting for peer)';
+        });
+
+        peer.on('connection', (c) => {
+            conn = c;
+            setupConnectionHandlers();
+        });
+
+        peer.on('error', (err) => {
+            alert('Peer error: ' + err.type);
+        });
+    }
+
+    function createRoom() {
+        const customId = document.getElementById('roomIdInput').value.trim();
+        initPeer(customId || undefined);
+    }
+
+    function joinRoom() {
+        const targetId = document.getElementById('roomIdInput').value.trim();
+        if (!targetId) return alert('Please enter a room code.');
+        
+        peer = new Peer();
+        peer.on('open', () => {
+            conn = peer.connect(targetId);
+            setupConnectionHandlers();
+        });
+    }
+
+    function setupConnectionHandlers() {
+        conn.on('open', () => {
+            document.getElementById('peerDot').classList.add('active');
+            document.getElementById('peerStatusText').innerText = 'Connected to Friend';
+        });
+
+        conn.on('data', (data) => {
+            handleRemoteMessage(data);
+        });
+
+        conn.on('close', () => {
+            document.getElementById('peerDot').classList.remove('active');
+            document.getElementById('peerStatusText').innerText = 'Disconnected';
+        });
+    }
+
+    // --- VLC HTTP API Communication ---
+    function getVlcHeaders() {
+        const pass = document.getElementById('vlcPassword').value;
+        return {
+            'Authorization': 'Basic ' + btoa(':' + pass)
+        };
+    }
+
+    async function getVlcStatus() {
+        try {
+            const res = await fetch('http://127.0.0.1:8080/requests/status.json', {
+                headers: getVlcHeaders()
+            });
+            if (res.ok) {
+                const data = await res.json();
+                return {
+                    state: data.state,
+                    time: data.time || 0,
+                    rate: data.rate || 1.0
+                };
+            }
+        } catch (e) {
+            return null;
+        }
+        return null;
+    }
+
+    async function sendVlcCommand(cmd, val = null) {
+        let url = `http://127.0.0.1:8080/requests/status.json?command=${cmd}`;
+        if (val !== null) url += `&val=${encodeURIComponent(val)}`;
+        try {
+            await fetch(url, { headers: getVlcHeaders() });
+        } catch (e) {}
+    }
+
+    // --- Dynamic Drift Correction & Remote Handling ---
+    async function handleRemoteMessage(msg) {
+        const local = await getVlcStatus();
+        if (!local) return;
+
+        isApplyingRemote = true;
+
+        if (msg.action === 'pause' && local.state === 'playing') {
+            await sendVlcCommand('pl_pause');
+        } else if (msg.action === 'play' && local.state === 'paused') {
+            await sendVlcCommand('pl_play');
+        }
+
+        if (msg.time !== undefined && local.state === 'playing') {
+            const drift = local.time - msg.time; // >0 means local is ahead
+            document.getElementById('driftText').innerText = `${drift.toFixed(2)}s`;
+
+            if (Math.abs(drift) > 2.0) {
+                // Large desync -> Hard seek
+                await sendVlcCommand('seek', msg.time);
+                await sendVlcCommand('rate', '1.0');
+            } else if (Math.abs(drift) > 0.3) {
+                // Soft dynamic adjustment
+                const rate = drift > 0 ? 0.96 : 1.04;
+                await sendVlcCommand('rate', rate.toString());
+            } else {
+                if (local.rate !== 1.0) await sendVlcCommand('rate', '1.0');
+            }
+        }
+
+        setTimeout(() => { isApplyingRemote = false; }, 600);
+    }
+
+    // --- Main Local Polling Loop ---
+    setInterval(async () => {
+        const local = await getVlcStatus();
+        const vlcDot = document.getElementById('vlcDot');
+        const vlcStatusText = document.getElementById('vlcStatusText');
+        const playbackState = document.getElementById('playbackState');
+
+        if (local) {
+            vlcDot.classList.add('active');
+            vlcStatusText.innerText = 'Connected';
+
+            const mins = Math.floor(local.time / 60);
+            const secs = Math.floor(local.time % 60).toString().padStart(2, '0');
+            playbackState.innerText = `VLC: ${mins}:${secs} (${local.state.toUpperCase()})`;
+
+            if (conn && conn.open && !isApplyingRemote) {
+                // Detect Play/Pause toggle
+                if (lastLocalState && local.state !== lastLocalState.state) {
+                    conn.send({ action: local.state, time: local.time });
+                }
+                // Detect manual timeline seek
+                else if (lastLocalState && local.state === 'playing' && Math.abs(local.time - (lastLocalState.time + 0.5)) > 2.0) {
+                    conn.send({ action: 'seek', time: local.time });
+                }
+                // Regular position sync heartbeat
+                else if (local.state === 'playing') {
+                    conn.send({ action: 'sync', time: local.time });
+                }
+            }
+
+            lastLocalState = local;
+        } else {
+            vlcDot.classList.remove('active');
+            vlcStatusText.innerText = 'Offline (Check VLC)';
+            playbackState.innerText = 'VLC: Disconnected';
+        }
+    }, 500);
+</script>
+</body>
+</html>
