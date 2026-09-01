@@ -7,7 +7,7 @@
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
-        .card { background: #1e293b; border-radius: 12px; padding: 24px; width: 100%; max-width: 420px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        .card { background: #1e293b; border-radius: 12px; padding: 24px; width: 100%; max-width: 440px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
         h2 { margin: 0 0 16px 0; text-align: center; }
         .box { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
         label { font-size: 12px; color: #94a3b8; display: block; margin-bottom: 4px; }
@@ -27,26 +27,26 @@
 <div class="card">
     <h2>🍿 VLC P2P Sync</h2>
 
-    <!-- Local Bridge Status -->
+    <!-- Local Desktop Bridge -->
     <div class="box">
         <label>Local Desktop Bridge</label>
         <div class="status">
-            <span>Status:</span>
-            <span><span id="bridgeDot" class="dot"></span> <span id="bridgeStatus">Disconnected</span></span>
+            <span>Desktop Bridge Status:</span>
+            <span><span id="bridgeDot" class="dot"></span> <span id="bridgeStatus">Connecting to Python...</span></span>
         </div>
     </div>
 
     <!-- P2P Room Connection -->
     <div class="box">
         <label>Room ID</label>
-        <input type="text" id="roomId" placeholder="Enter or generate room ID">
+        <input type="text" id="roomId" placeholder="Enter room ID (e.g. movie123)">
         <div class="btn-row">
             <button onclick="createRoom()">Host Room</button>
             <button class="secondary" onclick="joinRoom()">Join Room</button>
         </div>
         <div class="status" style="margin-top: 10px;">
-            <span>Friend Connection:</span>
-            <span><span id="peerDot" class="dot"></span> <span id="peerStatus">Disconnected</span></span>
+            <span>Peer Connection:</span>
+            <span><span id="peerDot" class="dot"></span> <span id="peerStatus">Not Connected</span></span>
         </div>
     </div>
 
@@ -54,7 +54,7 @@
     <div class="box">
         <div class="display" id="playerDisplay">VLC: --:-- (Paused)</div>
         <div class="status" style="margin-top: 8px;">
-            <span>Drift Offset:</span>
+            <span>Sync Offset:</span>
             <span id="driftDisplay">0.00s</span>
         </div>
         <div class="btn-row" style="margin-top: 10px;">
@@ -68,11 +68,10 @@
     let peer = null;
     let peerConn = null;
     let wsBridge = null;
-    let isApplyingRemote = false;
 
-    // 1. Connect to Local Python Desktop Bridge
-    function connectLocalBridge() {
-        wsBridge = new WebSocket('ws://127.0.0.1:9999');
+    // 1. WebSocket Bridge Connection
+    function initBridge() {
+        wsBridge = new WebSocket('ws://localhost:9999');
 
         wsBridge.onopen = () => {
             document.getElementById('bridgeDot').className = 'dot online';
@@ -82,84 +81,92 @@
         wsBridge.onclose = () => {
             document.getElementById('bridgeDot').className = 'dot';
             document.getElementById('bridgeStatus').innerText = 'Offline (Run vlc_bridge.py)';
-            setTimeout(connectLocalBridge, 2000);
+            setTimeout(initBridge, 2000);
+        };
+
+        wsBridge.onerror = () => {
+            wsBridge.close();
         };
 
         wsBridge.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            handleLocalVLCUpdate(data);
+            try {
+                const data = JSON.parse(event.data);
+                
+                // Update UI
+                const mins = Math.floor(data.time / 60);
+                const secs = (data.time % 60).toString().padStart(2, '0');
+                document.getElementById('playerDisplay').innerText = `VLC: ${mins}:${secs} (${data.state.toUpperCase()})`;
+
+                // Send to friend if connected
+                if (peerConn && peerConn.open && data.origin === "local") {
+                    peerConn.send(data);
+                }
+            } catch(e) {}
         };
     }
-    connectLocalBridge();
+    initBridge();
 
-    // 2. PeerJS / WebRTC Connection
+    // 2. PeerJS Setup
     function createRoom() {
-        const inputId = document.getElementById('roomId').value.trim();
-        peer = inputId ? new Peer(inputId) : new Peer();
+        const id = document.getElementById('roomId').value.trim();
+        if (peer) peer.destroy();
+        peer = id ? new Peer(id) : new Peer();
 
-        peer.on('open', (id) => {
-            document.getElementById('roomId').value = id;
-            document.getElementById('peerStatus').innerText = 'Waiting for friend...';
+        peer.on('open', (assignedId) => {
+            document.getElementById('roomId').value = assignedId;
+            document.getElementById('peerStatus').innerText = 'Room Open (Share ID)';
         });
 
         peer.on('connection', (conn) => {
             peerConn = conn;
-            bindPeerEvents();
+            setupPeerEvents();
+        });
+
+        peer.on('error', (err) => {
+            alert('Peer error: ' + err.type);
         });
     }
 
     function joinRoom() {
-        const targetId = document.getElementById('roomId').value.trim();
-        if (!targetId) return alert('Enter a room ID first');
+        const id = document.getElementById('roomId').value.trim();
+        if (!id) return alert('Enter Room ID to join');
 
+        if (peer) peer.destroy();
         peer = new Peer();
+
         peer.on('open', () => {
-            peerConn = peer.connect(targetId);
-            bindPeerEvents();
+            peerConn = peer.connect(id);
+            setupPeerEvents();
+        });
+
+        peer.on('error', (err) => {
+            alert('Peer error: ' + err.type);
         });
     }
 
-    function bindPeerEvents() {
+    function setupPeerEvents() {
         peerConn.on('open', () => {
             document.getElementById('peerDot').className = 'dot online';
-            document.getElementById('peerStatus').innerText = 'Connected (P2P)';
+            document.getElementById('peerStatus').innerText = 'Connected to Friend';
         });
 
         peerConn.on('data', (data) => {
-            handleRemotePeerData(data);
+            // Forward remote event directly to python client
+            if (wsBridge && wsBridge.readyState === WebSocket.OPEN) {
+                data.origin = "remote";
+                wsBridge.send(JSON.stringify(data));
+            }
         });
 
         peerConn.on('close', () => {
             document.getElementById('peerDot').className = 'dot';
-            document.getElementById('peerStatus').innerText = 'Friend Disconnected';
+            document.getElementById('peerStatus').innerText = 'Disconnected';
         });
-    }
-
-    // 3. Sync & Relay Logic
-    function handleLocalVLCUpdate(data) {
-        const mins = Math.floor(data.time / 60);
-        const secs = (data.time % 60).toString().padStart(2, '0');
-        document.getElementById('playerDisplay').innerText = `VLC: ${mins}:${secs} (${data.state.toUpperCase()})`;
-
-        // Broadcast local change to friend over WebRTC
-        if (peerConn && peerConn.open && !isApplyingRemote) {
-            peerConn.send(data);
-        }
-    }
-
-    function handleRemotePeerData(msg) {
-        if (!wsBridge || wsBridge.readyState !== WebSocket.OPEN) return;
-
-        isApplyingRemote = true;
-        // Forward command to local VLC bridge
-        wsBridge.send(JSON.stringify(msg));
-
-        setTimeout(() => { isApplyingRemote = false; }, 600);
     }
 
     function sendControl(action) {
         if (wsBridge && wsBridge.readyState === WebSocket.OPEN) {
-            wsBridge.send(JSON.stringify({ type: 'control', command: action === 'play' ? 'pl_play' : 'pl_pause' }));
+            wsBridge.send(JSON.stringify({ origin: "user_ui", action: action }));
         }
     }
 </script>
